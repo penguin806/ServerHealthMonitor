@@ -16,6 +16,7 @@ private slots:
 
 private:
     void _errorOccured(QString errorMsg);
+    bool _parseIpmiUtilOutput(QByteArray ipmiUtilOutput);
     QTimer readSensorTimer;
 };
 
