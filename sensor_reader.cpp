@@ -1,11 +1,13 @@
 #include "sensor_reader.h"
+#include "config_container.h"
 #include <QProcess>
 #include <QTextStream>
 #include <QMap>
 #include <QRegularExpression>
 #include <QDebug>
 
-SensorReader::SensorReader(QObject *parent) : QObject(parent)
+SensorReader::SensorReader(QObject *parent, ConfigContainer &globalConfig, LogManagement &logMan)
+    : QObject(parent),  globalConfig(globalConfig), logMan(logMan)
 {
 
 }
@@ -13,9 +15,10 @@ SensorReader::SensorReader(QObject *parent) : QObject(parent)
 void SensorReader::startWorking()
 {
     this->_readBmcSensor();
+    //puts("Start in 15 seconds...");
 
     QObject::connect(&this->readSensorTimer, SIGNAL(timeout()), this, SLOT(_readBmcSensor()));
-    this->readSensorTimer.setInterval(30000);
+    this->readSensorTimer.setInterval(15000);
     this->readSensorTimer.start();
 }
 
@@ -33,31 +36,48 @@ void SensorReader::_readBmcSensor()
     bool rv = ipmiUtilProcess.waitForStarted(3000);
     if(!rv)
     {
-        this->_errorOccured(QString("Start Fail! Code: ") + QString::number(ipmiUtilProcess.error()));
+        this->_errorOccured(QString("IpmiUtil start failed! Code: ") + QString::number(ipmiUtilProcess.error()));
         return;
     }
 
     rv = ipmiUtilProcess.waitForFinished(100000);
     if(!rv)
     {
-        this->_errorOccured(QString("Crashed! Code: ") + QString::number(ipmiUtilProcess.exitStatus()));
+        this->_errorOccured(QString("IpmiUtil crashed! Code: ") + QString::number(ipmiUtilProcess.exitStatus()));
     }
 
-    QByteArray outputData = ipmiUtilProcess.readAll();
-    qDebug() << outputData.data();
+    const QByteArray outputData = ipmiUtilProcess.readAll();
+    QMap<QString, QString> parsedData;
+    if(!this->_parseIpmiUtilOutput(outputData, &parsedData))
+    {
+        this->_errorOccured("IpmiUtil failed!");
+        return;
+    }
+
+    logMan.sensorDataReceived(parsedData);
+    this->_checkParsedValue(parsedData);
+}
+
+void SensorReader::_infoReceived(QString infoMsg)
+{
+    logMan.infoReceived(infoMsg);
 }
 
 void SensorReader::_errorOccured(QString errorMsg)
 {
-    qDebug() << errorMsg;
     this->readSensorTimer.stop();
+    logMan.errorOccured(errorMsg);
 }
 
-bool SensorReader::_parseIpmiUtilOutput(QByteArray ipmiUtilOutput)
+bool SensorReader::_parseIpmiUtilOutput(QByteArray ipmiUtilOutput, QMap<QString, QString> *parsedData)
 {
+    if(!parsedData)
+    {
+        return false;
+    }
+
     QTextStream outputStream(ipmiUtilOutput);
     QString line;
-    QMap<QString, QString> parsedData;
     int i = 1;
 
     for(; outputStream.readLineInto(&line); i++)
@@ -68,12 +88,13 @@ bool SensorReader::_parseIpmiUtilOutput(QByteArray ipmiUtilOutput)
             QRegularExpressionMatch match = ipmiUtilVersionExp.match(line);
             if(!match.hasMatch() || !match.capturedLength(1))
             {
-                this->_errorOccured("Unknown ipmiutil version, raw data:\n" + ipmiUtilOutput);
+                this->_infoReceived("Unknown ipmiutil version, raw data:\n" + ipmiUtilOutput);
                 return false;
             }
             else
             {
-                parsedData.insert("ipmiutilVersion", match.captured(1));
+                // KEY1: IPMIUTIL Version
+                parsedData->insert("ipmiutilVersion", match.captured(1));
             }
         }
         else if(2 == i)
@@ -81,7 +102,7 @@ bool SensorReader::_parseIpmiUtilOutput(QByteArray ipmiUtilOutput)
             QString idRangeLeft = line.split(" = ", QString::SkipEmptyParts).at(1);
             if(idRangeLeft != QString("0x3e"))
             {
-                this->_errorOccured("IdRangeLeft do not match: " + idRangeLeft);
+                this->_infoReceived("IdRangeLeft do not match: " + idRangeLeft);
                 return false;
             }
         }
@@ -90,29 +111,30 @@ bool SensorReader::_parseIpmiUtilOutput(QByteArray ipmiUtilOutput)
             QString idRangeRight = line.split(" = ", QString::SkipEmptyParts).at(1);
             if(idRangeRight != QString("0x4c"))
             {
-                this->_errorOccured("IdRangeRight do not match: " + idRangeRight);
+                this->_infoReceived("IdRangeRight do not match: " + idRangeRight);
                 return false;
             }
         }
         else if(4 == i)
         {
-            QRegularExpression bmcIpmiVersionExp("^-- BMC version ([\\d\\.]+), IPMI version ([\\d\\.]+)$");
+            QRegularExpression bmcIpmiVersionExp("^-- BMC version ([\\d\\.]+), IPMI version ([\\d\\.]+)");
             QRegularExpressionMatch match = bmcIpmiVersionExp.match(line);
             if(!match.hasMatch() || !match.capturedLength(1) || !match.capturedLength(2))
             {
-                this->_errorOccured("Unknown ipmiutil/bmc version: \n" + line);
+                this->_infoReceived("Unknown ipmiutil/bmc version: \n" + line);
                 return false;
             }
             else
             {
-                parsedData.insert("bmcIpmiVersion", match.captured(1) + '/' + match.captured(2));
+                // KEY2: BMC/IPMI Version
+                parsedData->insert("bmcIpmiVersion", match.captured(1) + '/' + match.captured(2));
             }
         }
         else if(5 == i)
         {
             if(line != QString("_ID_ SDR_Type_xx ET Own Typ S_Num   Sens_Description   Hex & Interp Reading"))
             {
-                this->_errorOccured("Header do not match: " + line);
+                this->_infoReceived("Header do not match: " + line);
                 return false;
             }
         }
@@ -120,7 +142,7 @@ bool SensorReader::_parseIpmiUtilOutput(QByteArray ipmiUtilOutput)
         {
             //Fan 1-8
             int fanID = i - 5;
-            QRegularExpression fanInfoExp("^(\\w{4}) SDR Full .{13} snum (\\w{2}) Fan Block (\\d) = \\d{1,3} (\\d{1,3}\\.\\d{1,2}) %, (.*)$");
+            QRegularExpression fanInfoExp("^(\\w{4}) SDR Full .{13} snum (\\w{2}) Fan Block (\\d) = \\w{2} (\\d{1,3}\\.\\d{1,2}) %, (.*)$");
             QRegularExpressionMatch match = fanInfoExp.match(line);
             if(
                     !match.hasMatch() || !match.capturedLength(1) || !match.capturedLength(2)
@@ -128,36 +150,63 @@ bool SensorReader::_parseIpmiUtilOutput(QByteArray ipmiUtilOutput)
                     || !match.capturedLength(5)
             )
             {
-                this->_errorOccured("Fan " + QString::number(fanID) + " read error: \n" + line);
+                this->_infoReceived("Fan " + QString::number(fanID) + " read error: \n" + line);
                 return false;
             }
             else
             {
-                parsedData.insert("fan" + QString::number(fanID), match.captured(4));
+                // KEY3-10: Fan 1-8 Speed
+                parsedData->insert("fan" + QString::number(fanID), match.captured(4));
             }
         }
         else if(14 <= i && i <= 18)
         {
             continue;
         }
-        else if(19 ==i)
+        else if(19 == i)
         {
-
+            QRegularExpression isRedundant("^004b SDR Full .* Fully Redundant$");
+            QRegularExpressionMatch match = isRedundant.match(line);
+            if(!match.hasMatch())
+            {
+                this->_infoReceived("Fan redundancy lost: \n" + line);
+                return false;
+            }
         }
         else if(20 == i)
         {
             if(line != QString("ipmiutil sensor, completed successfully"))
             {
-                this->_errorOccured("Complete line do not match: " + line);
+                this->_infoReceived("Complete line do not match: " + line);
                 return false;
             }
         }
     }
     if(21 != i)
     {
-        this->_errorOccured("Incomplete output:\n" + ipmiUtilOutput);
+        this->_infoReceived("Incomplete output:\n" + ipmiUtilOutput);
         return false;
     }
 
     return true;
+}
+
+void SensorReader::_checkParsedValue(QMap<QString, QString> &parsedData)
+{
+    const double fanSpeedThreshold = 40.0;
+
+    if(10 != parsedData.size())
+    {
+        this->_errorOccured("Incomplete data map: " + QString::number(parsedData.size()));
+        return;
+    }
+    for(int fanNum = 1; fanNum <= 8; fanNum++)
+    {
+        QString keyName = "fan" + QString::number(fanNum);
+        if(parsedData.value(keyName).toDouble() > fanSpeedThreshold)
+        {
+            this->_errorOccured("Fan " + QString::number(fanNum) + " speed exceeds threshold: " + parsedData.value(keyName));
+            return;
+        }
+    }
 }
