@@ -193,8 +193,6 @@ bool SensorReader::_parseIpmiUtilOutput(QByteArray ipmiUtilOutput, QMap<QString,
 
 void SensorReader::_checkParsedValue(QMap<QString, QString> &parsedData)
 {
-    const double fanSpeedThreshold = 40.0;
-
     if(10 != parsedData.size())
     {
         this->_errorOccured("Incomplete data map: " + QString::number(parsedData.size()));
@@ -203,7 +201,7 @@ void SensorReader::_checkParsedValue(QMap<QString, QString> &parsedData)
     for(int fanNum = 1; fanNum <= 8; fanNum++)
     {
         QString keyName = "fan" + QString::number(fanNum);
-        if(parsedData.value(keyName).toDouble() > fanSpeedThreshold)
+        if(parsedData.value(keyName).toDouble() > globalConfig.getFanSpeedThreshold())
         {
             this->_errorOccured("Fan " + QString::number(fanNum) + " speed exceeds threshold: " + parsedData.value(keyName));
             return;

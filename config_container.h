@@ -13,9 +13,13 @@ public:
     void printConfig();
 
     LOGMODE getLogMode() const;
+    double getFanSpeedThreshold() const;
+    bool getShutdownAfterThresholdExceeded() const;
 
 private:
     LOGMODE logMode;
+    double fanSpeedThreshold;
+    bool shutdownAfterThresholdExceeded;
 };
 
 #endif // CONFIGCONTAINER_H

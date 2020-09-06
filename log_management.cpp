@@ -28,8 +28,12 @@ void LogManagement::errorOccured(QString errorMsg, int errorLevel)
 {
     puts(errorMsg.toLocal8Bit().data());
     this->_writeLog(errorMsg, "ERROR");
-    this->_destroyLoggingSystem();
-    system("shutdown /s /f /t 1 /c ServerHealthMonitor");
+    if(globalConfig.getShutdownAfterThresholdExceeded())
+    {
+        this->_writeLog("Shutting down...", "INFO");
+        this->_destroyLoggingSystem();
+        system("shutdown /s /f /t 1 /c ServerHealthMonitor");
+    }
 }
 
 void LogManagement::_writeLog(QString log, QString type)
